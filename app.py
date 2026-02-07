@@ -233,6 +233,18 @@ with st.sidebar:
 # =========================================================
 search = st.text_input("🔍 Быстрый поиск (Баркод / Артикул / Короб / Наименование)")
 
+# Если пользователь меняет строку поиска — сбрасываем выделение строк,
+# чтобы не "переносилось" выделение на другой набор данных.
+if "prev_search" not in st.session_state:
+    st.session_state.prev_search = ""
+if search != st.session_state.prev_search:
+    st.session_state.prev_search = search
+    # закрываем возможные окна подтверждений/отгрузки, если они были открыты
+    for k in list(st.session_state.keys()):
+        if k.startswith("ship_open_") or k.startswith("del_open_") or k.startswith("arch_del_open_"):
+            st.session_state[k] = False
+    reset_selection()
+
 t1, t2, t3, t4, t5 = st.tabs(["🏠 ИП", "🏢 ООО", "📜 Архив", "💰 Хранение", "📊 Итого"])
 
 def apply_search(df: pd.DataFrame, query: str) -> pd.DataFrame:
@@ -292,7 +304,7 @@ def upsert_archive_row(conn, r, fio: str, ship_store: str, ship_date: date):
             "n": r["name"],
             "a": r["article"],
             "b": r["barcode"],
-            'q': float(r["quantity"]),
+            "q": r["quantity"],
             "bn": r["box_num"],
             "t": str(r["type"]).replace("000", "ООО"),
             "sd": ship_date.strftime("%d.%m.%Y"),
