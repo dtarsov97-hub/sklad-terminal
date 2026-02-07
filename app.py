@@ -292,7 +292,7 @@ def upsert_archive_row(conn, r, fio: str, ship_store: str, ship_date: date):
             "n": r["name"],
             "a": r["article"],
             "b": r["barcode"],
-            "q": r["quantity"],
+            'q': float(r["quantity"]),
             "bn": r["box_num"],
             "t": str(r["type"]).replace("000", "ООО"),
             "sd": ship_date.strftime("%d.%m.%Y"),
