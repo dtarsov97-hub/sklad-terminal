@@ -291,25 +291,22 @@ def shipment_ui(selected_rows: pd.DataFrame, storage_type: str, key: str):
             for i in idx_list:
                 r = df_source.iloc[i]
                 conn.execute(
-                    text(
-                        """
-                        INSERT INTO archive (uuid, name, article, barcode, quantity, box_num, type, ship_date, fio, ship_store)
-                        VALUES (:u, :n, :a, :b, :q, :bn, :t, :sd, :fio, :ss)
-                        """
-                    ),
-                    {
-                        "u": r["uuid"],
-                        "n": r["name"],
-                        "a": r["article"],
-                        "b": r["barcode"],
-                        "q": r["quantity"],
-                        "bn": r["box_num"],
-                        "t": str(r["type"]).replace("000", "ООО"),
-                        "sd": ship_date.strftime("%d.%m.%Y"),
-                        "fio": fio,
-                        "ss": ship_store,
-                    },
-                )
+    text("""
+        INSERT INTO archive (uuid, name, article, barcode, quantity, box_num, type, ship_date, fio, ship_store)
+        VALUES (:u, :n, :a, :b, :q, :bn, :t, :sd, :fio, :ss)
+        ON CONFLICT (uuid) DO UPDATE SET
+            name = EXCLUDED.name,
+            article = EXCLUDED.article,
+            barcode = EXCLUDED.barcode,
+            quantity = EXCLUDED.quantity,
+            box_num = EXCLUDED.box_num,
+            type = EXCLUDED.type,
+            ship_date = EXCLUDED.ship_date,
+            fio = EXCLUDED.fio,
+            ship_store = EXCLUDED.ship_store
+    """),
+    params_dict
+)
                 conn.execute(text("DELETE FROM stock WHERE uuid=:u"), {"u": r["uuid"]})
             conn.commit()
 
@@ -401,25 +398,22 @@ def render_table(storage_type: str, key: str):
                         for i in idx:
                             r = df.iloc[i]
                             conn.execute(
-                                text(
-                                    """
-                                    INSERT INTO archive (uuid, name, article, barcode, quantity, box_num, type, ship_date, fio, ship_store)
-                                    VALUES (:u, :n, :a, :b, :q, :bn, :t, :sd, :fio, :ss)
-                                    """
-                                ),
-                                {
-                                    "u": r["uuid"],
-                                    "n": r["name"],
-                                    "a": r["article"],
-                                    "b": r["barcode"],
-                                    "q": r["quantity"],
-                                    "bn": r["box_num"],
-                                    "t": str(r["type"]).replace("000", "ООО"),
-                                    "sd": ship_date.strftime("%d.%m.%Y"),
-                                    "fio": fio,
-                                    "ss": ship_store,
-                                },
-                            )
+    text("""
+        INSERT INTO archive (uuid, name, article, barcode, quantity, box_num, type, ship_date, fio, ship_store)
+        VALUES (:u, :n, :a, :b, :q, :bn, :t, :sd, :fio, :ss)
+        ON CONFLICT (uuid) DO UPDATE SET
+            name = EXCLUDED.name,
+            article = EXCLUDED.article,
+            barcode = EXCLUDED.barcode,
+            quantity = EXCLUDED.quantity,
+            box_num = EXCLUDED.box_num,
+            type = EXCLUDED.type,
+            ship_date = EXCLUDED.ship_date,
+            fio = EXCLUDED.fio,
+            ship_store = EXCLUDED.ship_store
+    """),
+    params_dict
+)
                             conn.execute(text("DELETE FROM stock WHERE uuid=:u"), {"u": r["uuid"]})
                         conn.commit()
 
