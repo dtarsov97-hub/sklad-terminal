@@ -26,9 +26,10 @@ engine = create_engine(DB_URL)
 # БД: таблицы stock / archive (archive хранит данные отгрузки)
 # =========================================================
 def init_db():
-    try:
+try:
     with engine.connect() as conn:
-            conn.execute(text("""
+        conn.execute(...)
+
                 CREATE TABLE IF NOT EXISTS stock (
                     uuid TEXT PRIMARY KEY,
                     name TEXT,
