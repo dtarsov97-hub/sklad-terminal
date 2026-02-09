@@ -4,6 +4,7 @@ import requests
 import math
 from datetime import datetime, date
 import io
+import hashlib
 from sqlalchemy import create_engine, text
 
 # =========================================================
@@ -25,43 +26,47 @@ engine = create_engine(DB_URL)
 # БД: таблицы stock / archive (archive хранит данные отгрузки)
 # =========================================================
 def init_db():
+    try:
     with engine.connect() as conn:
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS stock (
-                uuid TEXT PRIMARY KEY,
-                name TEXT,
-                article TEXT,
-                barcode TEXT,
-                quantity REAL,
-                box_num TEXT,
-                type TEXT
-            )
-        """))
-
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS archive (
-                uuid TEXT PRIMARY KEY,
-                name TEXT,
-                article TEXT,
-                barcode TEXT,
-                quantity REAL,
-                box_num TEXT,
-                type TEXT,
-                ship_date TEXT,
-                fio TEXT,
-                ship_store TEXT
-            )
-        """))
-
-        # если archive уже существовал (Postgres/Neon) — добавим недостающие столбцы
-        try:
-            conn.execute(text("ALTER TABLE archive ADD COLUMN IF NOT EXISTS ship_date TEXT"))
-            conn.execute(text("ALTER TABLE archive ADD COLUMN IF NOT EXISTS fio TEXT"))
-            conn.execute(text("ALTER TABLE archive ADD COLUMN IF NOT EXISTS ship_store TEXT"))
-        except Exception:
-            pass
-
-        conn.commit()
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS stock (
+                    uuid TEXT PRIMARY KEY,
+                    name TEXT,
+                    article TEXT,
+                    barcode TEXT,
+                    quantity REAL,
+                    box_num TEXT,
+                    type TEXT
+                )
+            """))
+    
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS archive (
+                    uuid TEXT PRIMARY KEY,
+                    name TEXT,
+                    article TEXT,
+                    barcode TEXT,
+                    quantity REAL,
+                    box_num TEXT,
+                    type TEXT,
+                    ship_date TEXT,
+                    fio TEXT,
+                    ship_store TEXT
+                )
+            """))
+    
+            # если archive уже существовал (Postgres/Neon) — добавим недостающие столбцы
+            try:
+                conn.execute(text("ALTER TABLE archive ADD COLUMN IF NOT EXISTS ship_date TEXT"))
+                conn.execute(text("ALTER TABLE archive ADD COLUMN IF NOT EXISTS fio TEXT"))
+                conn.execute(text("ALTER TABLE archive ADD COLUMN IF NOT EXISTS ship_store TEXT"))
+            except Exception:
+                pass
+    
+            conn.commit()
+except Exception as e:
+    st.error(f"Ошибка при записи в базу: {e}")
+    st.stop()
 
 init_db()
 
@@ -75,45 +80,49 @@ def check_and_log_daily():
         return
 
     today_str = now.strftime("%Y-%m-%d")
+    try:
     with engine.connect() as conn:
-        # если таблицы нет — просто выходим
-        try:
-            res = conn.execute(
-                text("SELECT 1 FROM daily_storage_logs WHERE log_date = :d"),
-                {"d": today_str}
-            ).fetchone()
-        except Exception:
-            return
-
-        if res:
-            return
-
-        df = pd.read_sql(text("SELECT * FROM stock"), engine)
-        if df.empty:
-            b_ip = b_ooo = 0
-        else:
-            df["type"] = df["type"].replace({"000": "ООО"})
-            b_ip = int((df["type"] == "ИП").sum())
-            b_ooo = int((df["type"] == "ООО").sum())
-
-        p_ip = int(math.ceil(b_ip / 16)) if b_ip else 0
-        p_ooo = int(math.ceil(b_ooo / 16)) if b_ooo else 0
-
-        cost_ip = p_ip * 50
-        cost_ooo = p_ooo * 50
-        total_cost = cost_ip + cost_ooo
-
-        conn.execute(text("""
-            INSERT INTO daily_storage_logs
-            (log_date, boxes_ip, pallets_ip, cost_ip, boxes_ooo, pallets_ooo, cost_ooo, total_cost)
-            VALUES (:d, :bi, :pi, :ci, :bo, :po, :co, :tc)
-        """), {
-            "d": today_str,
-            "bi": b_ip, "pi": p_ip, "ci": cost_ip,
-            "bo": b_ooo, "po": p_ooo, "co": cost_ooo,
-            "tc": total_cost
-        })
-        conn.commit()
+            # если таблицы нет — просто выходим
+            try:
+                res = conn.execute(
+                    text("SELECT 1 FROM daily_storage_logs WHERE log_date = :d"),
+                    {"d": today_str}
+                ).fetchone()
+            except Exception:
+                return
+    
+            if res:
+                return
+    
+            df = pd.read_sql(text("SELECT * FROM stock"), engine)
+            if df.empty:
+                b_ip = b_ooo = 0
+            else:
+                df["type"] = df["type"].replace({"000": "ООО"})
+                b_ip = int((df["type"] == "ИП").sum())
+                b_ooo = int((df["type"] == "ООО").sum())
+    
+            p_ip = int(math.ceil(b_ip / 16)) if b_ip else 0
+            p_ooo = int(math.ceil(b_ooo / 16)) if b_ooo else 0
+    
+            cost_ip = p_ip * 50
+            cost_ooo = p_ooo * 50
+            total_cost = cost_ip + cost_ooo
+    
+            conn.execute(text("""
+                INSERT INTO daily_storage_logs
+                (log_date, boxes_ip, pallets_ip, cost_ip, boxes_ooo, pallets_ooo, cost_ooo, total_cost)
+                VALUES (:d, :bi, :pi, :ci, :bo, :po, :co, :tc)
+            """), {
+                "d": today_str,
+                "bi": b_ip, "pi": p_ip, "ci": cost_ip,
+                "bo": b_ooo, "po": p_ooo, "co": cost_ooo,
+                "tc": total_cost
+            })
+            conn.commit()
+except Exception as e:
+    st.error(f"Ошибка при записи в базу: {e}")
+    st.stop()
 
 try:
     check_and_log_daily()
@@ -169,26 +178,30 @@ with st.sidebar:
 
             mapping = {str(r.get("code")): (r.get("article", "-"), r.get("name", "Неизвестно")) for r in ms_rows}
 
-            with engine.connect() as conn:
-                for i, row in new_data.iterrows():
-                    art, name = mapping.get(str(row["Баркод"]), ("-", "Новый товар"))
-                    uid = f"ID_{datetime.now().timestamp()}_{row['Баркод']}_{i}"
-                    conn.execute(
-                        text("""
-                            INSERT INTO stock (uuid, name, article, barcode, quantity, box_num, type)
-                            VALUES (:u, :n, :a, :b, :q, :bn, :t)
-                        """),
-                        {
-                            "u": str(uid),
-                            "n": str(name),
-                            "a": str(art),
-                            "b": str(row["Баркод"]),
-                            "q": float(row["Кол-во"]),
-                            "bn": str(row["Номер короба"]),
-                            "t": str(target_type),
-                        }
-                    )
-                conn.commit()
+            try:
+    with engine.connect() as conn:
+                    for i, row in new_data.iterrows():
+                        art, name = mapping.get(str(row["Баркод"]), ("-", "Новый товар"))
+                        uid = f"ID_{datetime.now().timestamp()}_{row['Баркод']}_{i}"
+                        conn.execute(
+                            text("""
+                                INSERT INTO stock (uuid, name, article, barcode, quantity, box_num, type)
+                                VALUES (:u, :n, :a, :b, :q, :bn, :t)
+                            """),
+                            {
+                                "u": str(uid),
+                                "n": str(name),
+                                "a": str(art),
+                                "b": str(row["Баркод"]),
+                                "q": float(row["Кол-во"]),
+                                "bn": str(row["Номер короба"]),
+                                "t": str(target_type),
+                            }
+                        )
+                    conn.commit()
+except Exception as e:
+    st.error(f"Ошибка при записи в базу: {e}")
+    st.stop()
 
             reset_selection()
             st.success("Данные сохранены!")
@@ -233,17 +246,9 @@ with st.sidebar:
 # =========================================================
 search = st.text_input("🔍 Быстрый поиск (Баркод / Артикул / Короб / Наименование)")
 
-# Если пользователь меняет строку поиска — сбрасываем выделение строк,
-# чтобы не "переносилось" выделение на другой набор данных.
-if "prev_search" not in st.session_state:
-    st.session_state.prev_search = ""
-if search != st.session_state.prev_search:
-    st.session_state.prev_search = search
-    # закрываем возможные окна подтверждений/отгрузки, если они были открыты
-    for k in list(st.session_state.keys()):
-        if k.startswith("ship_open_") or k.startswith("del_open_") or k.startswith("arch_del_open_"):
-            st.session_state[k] = False
-    reset_selection()
+# Хэш поиска нужен, чтобы сбрасывать выделение таблицы при смене фильтра,
+# но при этом сохранять "корзину отгрузки" (выбор) между разными поисками.
+search_hash = hashlib.md5(search.encode("utf-8")).hexdigest()[:8]
 
 t1, t2, t3, t4, t5 = st.tabs(["🏠 ИП", "🏢 ООО", "📜 Архив", "💰 Хранение", "📊 Итого"])
 
@@ -253,6 +258,18 @@ def apply_search(df: pd.DataFrame, query: str) -> pd.DataFrame:
     q = query.strip()
     mask = df.astype(str).apply(lambda col: col.str.contains(q, case=False, na=False)).any(axis=1)
     return df[mask]
+
+
+def _norm_str(v):
+    """Приводим значения из pandas/numpy к обычным Python-типам для Postgres."""
+    try:
+        if pd.isna(v):
+            return None
+    except Exception:
+        pass
+    if v is None:
+        return None
+    return str(v)
 
 def make_view_stock(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -284,6 +301,9 @@ def make_excel_shipment(selected_rows: pd.DataFrame, storage_type: str, fio: str
     return output.getvalue()
 
 def upsert_archive_row(conn, r, fio: str, ship_store: str, ship_date: date):
+    if hasattr(r, "to_dict"):
+        r = r.to_dict()
+
     conn.execute(
         text("""
             INSERT INTO archive (uuid, name, article, barcode, quantity, box_num, type, ship_date, fio, ship_store)
@@ -300,30 +320,45 @@ def upsert_archive_row(conn, r, fio: str, ship_store: str, ship_date: date):
                 ship_store = EXCLUDED.ship_store
         """),
         {
-            "u": r["uuid"],
-            "n": r["name"],
-            "a": r["article"],
-            "b": r["barcode"],
-            "q": r["quantity"],
-            "bn": r["box_num"],
-            "t": str(r["type"]).replace("000", "ООО"),
+            "u": _norm_str(r.get("uuid")),
+            "n": _norm_str(r.get("name")),
+            "a": _norm_str(r.get("article")),
+            "b": _norm_str(r.get("barcode")),
+            "q": float(r.get("quantity") or 0),
+            "bn": _norm_str(r.get("box_num")),
+            "t": _norm_str(str(r.get("type", "")).replace("000", "ООО")),
             "sd": ship_date.strftime("%d.%m.%Y"),
-            "fio": fio,
-            "ss": ship_store,
+            "fio": _norm_str(fio),
+            "ss": _norm_str(ship_store),
         }
     )
 
+
+
 def render_table(storage_type: str, key: str):
+    """
+    Важно: выбор строк должен сохраняться между разными поисками.
+    Поэтому мы используем "корзину" (set uuid) в st.session_state.
+    А выделение таблицы сбрасываем при смене поиска через search_hash.
+    """
+    cart_key = f"ship_cart_{key}"
+    if cart_key not in st.session_state:
+        st.session_state[cart_key] = set()
+
+    # Загружаем данные по текущему юр.лицу
     df = pd.read_sql(text("SELECT * FROM stock WHERE type=:t"), engine, params={"t": storage_type})
     df["type"] = df["type"].replace({"000": "ООО"})
-    df = apply_search(df, search)
-    view = make_view_stock(df)
+
+    # Фильтр поиска
+    df_filtered = apply_search(df, search)
+    view = make_view_stock(df_filtered)
 
     if df.empty:
         st.info(f"Склад {storage_type} пуст")
         return
 
-    table_key = f"table_{key}_{st.session_state.reset_counter}"
+    # Таблица с данными (сброс выделения при смене поиска)
+    table_key = f"table_{key}_{st.session_state.reset_counter}_{search_hash}"
     sel = st.dataframe(
         view,
         use_container_width=True,
@@ -333,95 +368,147 @@ def render_table(storage_type: str, key: str):
         key=table_key,
     )
     idx = sel.get("selection", {}).get("rows", [])
-    if not idx:
-        return
 
-    c1, c2 = st.columns(2)
+    # Кнопки управления корзиной (добавить/очистить)
+    cA, cB, cC = st.columns([1, 1, 2])
 
-    # ---- ОТГРУЗКА ----
-    if c1.button(f"🚀 Отгрузка ({len(idx)})", key=f"ship_btn_{key}"):
-        st.session_state[f"ship_open_{key}"] = True
+    if cA.button(f"➕ Добавить в отгрузку ({len(idx)})", disabled=(len(idx) == 0), key=f"add_cart_{key}"):
+        # добавляем uuid выбранных строк из ОТФИЛЬТРОВАННОЙ таблицы
+        for i in idx:
+            st.session_state[cart_key].add(str(df_filtered.iloc[i]["uuid"]))
+        st.rerun()
 
-    if st.session_state.get(f"ship_open_{key}", False):
-        if hasattr(st, "dialog"):
-            @st.dialog("Параметры отгрузки")
-            def ship_dialog():
-                fio = st.text_input("ФИО")
-                ship_store = st.text_input("Склад отгрузки")
-                ship_date = st.date_input("Дата отгрузки", value=datetime.now().date())
+    if cB.button("🧹 Очистить отгрузку", disabled=(len(st.session_state[cart_key]) == 0), key=f"clear_cart_{key}"):
+        st.session_state[cart_key] = set()
+        st.session_state[f"ship_open_{key}"] = False
+        st.rerun()
 
-                disabled = not (fio.strip() and ship_store.strip())
-                if disabled:
-                    st.info("Заполни ФИО и склад отгрузки, чтобы подтвердить отгрузку.")
+    # --- Корзина отгрузки (сохранённые строки) ---
+    cart_uuids = list(st.session_state[cart_key])
+    st.markdown(f"### 🧾 Выбрано к отгрузке: **{len(cart_uuids)}**")
 
-                selected_rows = df.iloc[idx].copy()
-                excel_bytes = make_excel_shipment(selected_rows, storage_type, fio, ship_store, ship_date)
+    if cart_uuids:
+        # берём строки из общей таблицы df по uuid
+        df_cart = df[df["uuid"].astype(str).isin(cart_uuids)].copy()
+        # Если что-то уже исчезло из stock (например, отгрузили), чистим корзину
+        missing = set(cart_uuids) - set(df_cart["uuid"].astype(str).tolist())
+        if missing:
+            st.session_state[cart_key] = set(df_cart["uuid"].astype(str).tolist())
+            cart_uuids = list(st.session_state[cart_key])
 
-                if st.download_button(
-                    "⬇️ Скачать и подтвердить отгрузку",
-                    data=excel_bytes,
-                    file_name=f"shipment_{storage_type}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    disabled=disabled,
-                    key=f"dl_ship_{key}_{st.session_state.reset_counter}",
-                ):
-                    with engine.connect() as conn:
-                        for i in idx:
-                            r = df.iloc[i]
-                            upsert_archive_row(conn, r, fio=fio, ship_store=ship_store, ship_date=ship_date)
-                            conn.execute(text("DELETE FROM stock WHERE uuid=:u"), {"u": r["uuid"]})
-                        conn.commit()
+        view_cart = make_view_stock(df_cart)
 
-                    st.session_state[f"ship_open_{key}"] = False
-                    reset_selection()
-                    st.rerun()
+        cart_table_key = f"cart_table_{key}_{st.session_state.reset_counter}"
+        sel_cart = st.dataframe(
+            view_cart,
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="multi-row",
+            key=cart_table_key,
+        )
+        cart_idx = sel_cart.get("selection", {}).get("rows", [])
 
-            ship_dialog()
-        else:
-            with st.expander("Параметры отгрузки", expanded=True):
-                fio = st.text_input("ФИО", key=f"fio_{key}")
-                ship_store = st.text_input("Склад отгрузки", key=f"ship_store_{key}")
-                ship_date = st.date_input("Дата отгрузки", value=datetime.now().date(), key=f"ship_date_{key}")
-
-                disabled = not (fio.strip() and ship_store.strip())
-                selected_rows = df.iloc[idx].copy()
-                excel_bytes = make_excel_shipment(selected_rows, storage_type, fio, ship_store, ship_date)
-
-                if st.download_button(
-                    "⬇️ Скачать и подтвердить отгрузку",
-                    data=excel_bytes,
-                    file_name=f"shipment_{storage_type}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    disabled=disabled,
-                    key=f"dl_ship_fb_{key}_{st.session_state.reset_counter}",
-                ):
-                    with engine.connect() as conn:
-                        for i in idx:
-                            r = df.iloc[i]
-                            upsert_archive_row(conn, r, fio=fio, ship_store=ship_store, ship_date=ship_date)
-                            conn.execute(text("DELETE FROM stock WHERE uuid=:u"), {"u": r["uuid"]})
-                        conn.commit()
-
-                    st.session_state[f"ship_open_{key}"] = False
-                    reset_selection()
-                    st.rerun()
-
-    # ---- УДАЛЕНИЕ ----
-    if c2.button(f"🗑️ Удалить ({len(idx)})", key=f"del_btn_{key}"):
-        st.session_state[f"del_open_{key}"] = True
-
-    if st.session_state.get(f"del_open_{key}", False):
-        st.warning("Удаление необратимо. Введите слово **УДАЛИТЬ** для подтверждения.")
-        confirm = st.text_input("Подтверждение", key=f"confirm_del_{key}")
-        if st.button("✅ Подтвердить удаление", key=f"confirm_del_btn_{key}") and confirm.strip().upper() == "УДАЛИТЬ":
-            with engine.connect() as conn:
-                for i in idx:
-                    conn.execute(text("DELETE FROM stock WHERE uuid=:u"), {"u": df.iloc[i]["uuid"]})
-                conn.commit()
-            st.session_state[f"del_open_{key}"] = False
-            reset_selection()
+        cc1, cc2 = st.columns(2)
+        if cc1.button(f"➖ Убрать из отгрузки ({len(cart_idx)})", disabled=(len(cart_idx) == 0), key=f"rm_cart_{key}"):
+            for i in cart_idx:
+                st.session_state[cart_key].discard(str(df_cart.iloc[i]["uuid"]))
             st.rerun()
 
+        # --- ОТГРУЗКА ---
+        if cc2.button(f"🚀 Отгрузка ({len(cart_uuids)})", disabled=(len(cart_uuids) == 0), key=f"ship_btn_{key}"):
+            st.session_state[f"ship_open_{key}"] = True
+
+        if st.session_state.get(f"ship_open_{key}", False):
+            if hasattr(st, "dialog"):
+                @st.dialog("Параметры отгрузки")
+                def ship_dialog():
+                    fio = st.text_input("ФИО")
+                    ship_store = st.text_input("Склад отгрузки")
+                    ship_date = st.date_input("Дата отгрузки", value=datetime.now().date())
+
+                    disabled = not (fio.strip() and ship_store.strip())
+                    if disabled:
+                        st.info("Заполни ФИО и склад отгрузки, чтобы подтвердить отгрузку.")
+
+                    # актуальные строки из stock
+                    df_cart2 = pd.read_sql(
+                        text("SELECT * FROM stock WHERE type=:t"),
+                        engine,
+                        params={"t": storage_type}
+                    )
+                    df_cart2["type"] = df_cart2["type"].replace({"000": "ООО"})
+                    df_cart2 = df_cart2[df_cart2["uuid"].astype(str).isin(list(st.session_state[cart_key]))].copy()
+
+                    excel_bytes = make_excel_shipment(df_cart2, storage_type, fio, ship_store, ship_date)
+
+                    if st.download_button(
+                        "⬇️ Скачать и подтвердить отгрузку",
+                        data=excel_bytes,
+                        file_name=f"shipment_{storage_type}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        disabled=disabled,
+                        key=f"dl_ship_{key}_{st.session_state.reset_counter}",
+                    ):
+                        try:
+    with engine.connect() as conn:
+                                for _, r in df_cart2.iterrows():
+                                    r = r.to_dict()
+                                    # гарантируем обычные типы (без numpy)
+                                    r["quantity"] = float(r.get("quantity") or 0)
+                                    upsert_archive_row(conn, r, fio=fio, ship_store=ship_store, ship_date=ship_date)
+                                    conn.execute(text("DELETE FROM stock WHERE uuid=:u"), {"u": r["uuid"]})
+                                conn.commit()
+except Exception as e:
+    st.error(f"Ошибка при записи в базу: {e}")
+    st.stop()
+
+                        st.session_state[f"ship_open_{key}"] = False
+                        st.session_state[cart_key] = set()
+                        reset_selection()
+                        st.rerun()
+
+                ship_dialog()
+            else:
+                with st.expander("Параметры отгрузки", expanded=True):
+                    fio = st.text_input("ФИО", key=f"fio_{key}")
+                    ship_store = st.text_input("Склад отгрузки", key=f"ship_store_{key}")
+                    ship_date = st.date_input("Дата отгрузки", value=datetime.now().date(), key=f"ship_date_{key}")
+
+                    disabled = not (fio.strip() and ship_store.strip())
+
+                    df_cart2 = pd.read_sql(
+                        text("SELECT * FROM stock WHERE type=:t"),
+                        engine,
+                        params={"t": storage_type}
+                    )
+                    df_cart2["type"] = df_cart2["type"].replace({"000": "ООО"})
+                    df_cart2 = df_cart2[df_cart2["uuid"].astype(str).isin(list(st.session_state[cart_key]))].copy()
+
+                    excel_bytes = make_excel_shipment(df_cart2, storage_type, fio, ship_store, ship_date)
+
+                    if st.download_button(
+                        "⬇️ Скачать и подтвердить отгрузку",
+                        data=excel_bytes,
+                        file_name=f"shipment_{storage_type}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        disabled=disabled,
+                        key=f"dl_ship_fb_{key}_{st.session_state.reset_counter}",
+                    ):
+                        with engine.connect() as conn:
+                            for _, r in df_cart2.iterrows():
+                                r = r.to_dict()
+                                r["quantity"] = float(r.get("quantity") or 0)
+                                upsert_archive_row(conn, r, fio=fio, ship_store=ship_store, ship_date=ship_date)
+                                conn.execute(text("DELETE FROM stock WHERE uuid=:u"), {"u": r["uuid"]})
+                            conn.commit()
+
+                        st.session_state[f"ship_open_{key}"] = False
+                        st.session_state[cart_key] = set()
+                        reset_selection()
+                        st.rerun()
+    else:
+        st.caption("Выбирай строки в таблице сверху и нажимай «Добавить в отгрузку». Потом можешь менять поиск — выбор сохранится.")
 with t1:
     render_table("ИП", "ip")
 
