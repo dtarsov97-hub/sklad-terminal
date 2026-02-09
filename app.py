@@ -26,10 +26,10 @@ engine = create_engine(DB_URL)
 # БД: таблицы stock / archive (archive хранит данные отгрузки)
 # =========================================================
 def init_db():
-try:
-    with engine.connect() as conn:
-        conn.execute(...)
-
+    """Создаёт таблицы stock и archive (если их нет) и добавляет недостающие столбцы в archive."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS stock (
                     uuid TEXT PRIMARY KEY,
                     name TEXT,
@@ -40,7 +40,6 @@ try:
                     type TEXT
                 )
             """))
-    
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS archive (
                     uuid TEXT PRIMARY KEY,
@@ -55,81 +54,84 @@ try:
                     ship_store TEXT
                 )
             """))
-    
             # если archive уже существовал (Postgres/Neon) — добавим недостающие столбцы
             try:
                 conn.execute(text("ALTER TABLE archive ADD COLUMN IF NOT EXISTS ship_date TEXT"))
                 conn.execute(text("ALTER TABLE archive ADD COLUMN IF NOT EXISTS fio TEXT"))
                 conn.execute(text("ALTER TABLE archive ADD COLUMN IF NOT EXISTS ship_store TEXT"))
             except Exception:
+                # для SQLite IF NOT EXISTS в ALTER может быть недоступен в старых версиях — игнорируем
                 pass
-    
-            conn.commit()
-except Exception as e:
-    st.error(f"Ошибка при записи в базу: {e}")
-    st.stop()
+    except Exception as e:
+        st.error(f"Ошибка при инициализации базы данных: {e}")
+        st.stop()
 
 init_db()
+
 
 # =========================================================
 # ЕЖЕДНЕВНЫЙ ЛОГ ХРАНЕНИЯ (23:00+)
 # Ожидаем таблицу daily_storage_logs (по вашей инструкции).
 # =========================================================
 def check_and_log_daily():
+    """Записывает дневной лог хранения в daily_storage_logs (если сейчас 23:00+ и записи за сегодня ещё нет)."""
     now = datetime.now()
     if now.hour < 23:
         return
 
     today_str = now.strftime("%Y-%m-%d")
+
     try:
-    with engine.connect() as conn:
+        with engine.begin() as conn:
             # если таблицы нет — просто выходим
             try:
                 res = conn.execute(
                     text("SELECT 1 FROM daily_storage_logs WHERE log_date = :d"),
-                    {"d": today_str}
+                    {"d": today_str},
                 ).fetchone()
             except Exception:
                 return
-    
+
             if res:
                 return
-    
-            df = pd.read_sql(text("SELECT * FROM stock"), engine)
-            if df.empty:
-                b_ip = b_ooo = 0
-            else:
-                df["type"] = df["type"].replace({"000": "ООО"})
-                b_ip = int((df["type"] == "ИП").sum())
-                b_ooo = int((df["type"] == "ООО").sum())
-    
+
+            # считаем количество коробов по stock
+            b_ip = conn.execute(text("SELECT COUNT(*) FROM stock WHERE type='ip'")).scalar() or 0
+            b_ooo = conn.execute(text("SELECT COUNT(*) FROM stock WHERE type='ooo'")).scalar() or 0
+
             p_ip = int(math.ceil(b_ip / 16)) if b_ip else 0
             p_ooo = int(math.ceil(b_ooo / 16)) if b_ooo else 0
-    
+
             cost_ip = p_ip * 50
             cost_ooo = p_ooo * 50
             total_cost = cost_ip + cost_ooo
-    
-            conn.execute(text("""
-                INSERT INTO daily_storage_logs
-                (log_date, boxes_ip, pallets_ip, cost_ip, boxes_ooo, pallets_ooo, cost_ooo, total_cost)
-                VALUES (:d, :bi, :pi, :ci, :bo, :po, :co, :tc)
-            """), {
-                "d": today_str,
-                "bi": b_ip, "pi": p_ip, "ci": cost_ip,
-                "bo": b_ooo, "po": p_ooo, "co": cost_ooo,
-                "tc": total_cost
-            })
-            conn.commit()
-except Exception as e:
-    st.error(f"Ошибка при записи в базу: {e}")
-    st.stop()
 
-try:
-    check_and_log_daily()
-except Exception:
-    # не валим приложение, если что-то не так с таблицей логов
-    pass
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO daily_storage_logs
+                    (log_date, boxes_ip, pallets_ip, cost_ip, boxes_ooo, pallets_ooo, cost_ooo, total_cost)
+                    VALUES (:d, :bi, :pi, :ci, :bo, :po, :co, :tc)
+                    """
+                ),
+                {
+                    "d": today_str,
+                    "bi": int(b_ip),
+                    "pi": int(p_ip),
+                    "ci": float(cost_ip),
+                    "bo": int(b_ooo),
+                    "po": int(p_ooo),
+                    "co": float(cost_ooo),
+                    "tc": float(total_cost),
+                },
+            )
+    except Exception:
+        # не валим приложение, если что-то не так с таблицей логов/правами
+        return
+
+
+check_and_log_daily()
+
 
 # =========================================================
 # UI
@@ -175,34 +177,37 @@ with st.sidebar:
     if uploaded_file and st.button("➕ Добавить на баланс"):
         try:
             new_data = pd.read_excel(uploaded_file)
+            # ожидаем 3 колонки: баркод, количество, номер короба
+            new_data = new_data.iloc[:, :3]
             new_data.columns = ["Баркод", "Кол-во", "Номер короба"]
 
+            # справочник из МоегоСклада: barcode -> (article, name)
             mapping = {str(r.get("code")): (r.get("article", "-"), r.get("name", "Неизвестно")) for r in ms_rows}
 
-            try:
-    with engine.connect() as conn:
-                    for i, row in new_data.iterrows():
-                        art, name = mapping.get(str(row["Баркод"]), ("-", "Новый товар"))
-                        uid = f"ID_{datetime.now().timestamp()}_{row['Баркод']}_{i}"
-                        conn.execute(
-                            text("""
-                                INSERT INTO stock (uuid, name, article, barcode, quantity, box_num, type)
-                                VALUES (:u, :n, :a, :b, :q, :bn, :t)
-                            """),
-                            {
-                                "u": str(uid),
-                                "n": str(name),
-                                "a": str(art),
-                                "b": str(row["Баркод"]),
-                                "q": float(row["Кол-во"]),
-                                "bn": str(row["Номер короба"]),
-                                "t": str(target_type),
-                            }
-                        )
-                    conn.commit()
-except Exception as e:
-    st.error(f"Ошибка при записи в базу: {e}")
-    st.stop()
+            with engine.begin() as conn:
+                for j, row in new_data.iterrows():
+                    barcode = str(row["Баркод"]).strip()
+                    qty = float(row["Кол-во"]) if not pd.isna(row["Кол-во"]) else 0.0
+                    box_num = str(row["Номер короба"]).strip()
+
+                    art, name = mapping.get(barcode, ("-", "Новый товар"))
+                    uid = f"ID_{datetime.now().timestamp()}_{barcode}_{j}"
+
+                    conn.execute(
+                        text("""
+                            INSERT INTO stock (uuid, name, article, barcode, quantity, box_num, type)
+                            VALUES (:u, :n, :a, :b, :q, :bn, :t)
+                        """),
+                        {
+                            "u": uid,
+                            "n": str(name),
+                            "a": str(art),
+                            "b": barcode,
+                            "q": qty,
+                            "bn": box_num,
+                            "t": target_type,  # 'ИП' или 'ООО'
+                        },
+                    )
 
             reset_selection()
             st.success("Данные сохранены!")
@@ -452,17 +457,15 @@ def render_table(storage_type: str, key: str):
                         key=f"dl_ship_{key}_{st.session_state.reset_counter}",
                     ):
                         try:
-    with engine.connect() as conn:
+                            with engine.begin() as conn:
                                 for _, r in df_cart2.iterrows():
-                                    r = r.to_dict()
-                                    # гарантируем обычные типы (без numpy)
-                                    r["quantity"] = float(r.get("quantity") or 0)
-                                    upsert_archive_row(conn, r, fio=fio, ship_store=ship_store, ship_date=ship_date)
-                                    conn.execute(text("DELETE FROM stock WHERE uuid=:u"), {"u": r["uuid"]})
-                                conn.commit()
-except Exception as e:
-    st.error(f"Ошибка при записи в базу: {e}")
-    st.stop()
+                                    rr = r.to_dict()
+                                    rr["quantity"] = float(rr.get("quantity") or 0)
+                                    upsert_archive_row(conn, rr, fio=fio, ship_store=ship_store, ship_date=ship_date)
+                                    conn.execute(text("DELETE FROM stock WHERE uuid=:u"), {"u": rr["uuid"]})
+                        except Exception as e:
+                            st.error(f"Ошибка при записи в базу: {e}")
+                            st.stop()
 
                         st.session_state[f"ship_open_{key}"] = False
                         st.session_state[cart_key] = set()
